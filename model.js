@@ -1,5 +1,7 @@
 import express from "express";
 import bodyParser from "body-parser";
+import multer from "multer";
+import fs from "fs";
 import { PDFLoader } from "@langchain/community/document_loaders/fs/pdf";
 import { RecursiveCharacterTextSplitter } from "@langchain/textsplitters";
 import { OpenAIEmbeddings } from "@langchain/openai";
@@ -16,6 +18,9 @@ app.use(bodyParser.json());
 
 let vectorStore;
 
+// Set up multer for file handling
+const upload = multer({ dest: "uploads/" });
+
 // Helper function to format LLM output
 const formatResponse = (response, status) => {
   return `
@@ -27,56 +32,43 @@ const formatResponse = (response, status) => {
   `;
 };
 
-// Endpoint 1: Process and store a resume
-app.post("/process-resume", async (req, res) => {
-  const { resumeText, status } = req.body;
+// Endpoint 1: Process and store a PDF resume
+app.post("/process-pdf-resume", upload.single("resume"), async (req, res) => {
+  const { status } = req.body;
+  const { file } = req;
 
-  if (!resumeText || !status) {
-    return res.status(400).json({ error: "Resume text and status are required." });
+  if (!file || !status) {
+    return res.status(400).json({ error: "Resume file and status are required." });
   }
 
-  // LLM Prompt to extract details
-  const promptTemplate = PromptTemplate.fromTemplate(
-    `Extract the following details from the resume:
+  try {
+    // Load and process the uploaded PDF document
+    const loader = new PDFLoader(file.path);
+    const docs = await loader.load();
 
-    Education:
-    Skills:
-    Extra Curricular:
-    Experience:
+    const splitter = new RecursiveCharacterTextSplitter({
+      chunkSize: 1000,
+      chunkOverlap: 10,
+    });
 
-    Resume:
-    {resumeText}`
-  );
+    const chunks = await splitter.splitDocuments(docs);
 
-  const llm = new OpenAI({
-    apiKey: process.env.OPENAI_API_KEY,
-  });
+    // Store the processed chunks in the vector database
+    if (!vectorStore) {
+      vectorStore = await FaissStore.fromDocuments(chunks, new OpenAIEmbeddings());
+      console.log("success in vector store here")
+    } else {
+      await vectorStore.addDocuments(chunks);
+    }
 
-  const chain = RunnableSequence.from([
-    { resumeText },
-    promptTemplate,
-    llm,
-  ]);
+    // Optionally, delete the uploaded file after processing
+    fs.unlinkSync(file.path);
 
-  const response = await chain.invoke(req.body);
-  const formattedResponse = formatResponse(response, status);
-
-  // Split the formatted response into chunks
-  const splitter = new RecursiveCharacterTextSplitter({
-    chunkSize: 1000,
-    chunkOverlap: 10,
-  });
-
-  const chunks = await splitter.splitDocuments([{ pageContent: formattedResponse }]);
-
-  // Store the processed resume in the vector database
-  if (!vectorStore) {
-    vectorStore = await FaissStore.fromDocuments(chunks, new OpenAIEmbeddings());
-  } else {
-    await vectorStore.addDocuments(chunks);
+    return res.status(200).json({ message: "PDF resume processed and stored successfully." });
+  } catch (error) {
+    console.error("Error processing PDF resume:", error);
+    return res.status(500).json({ error: "Failed to process PDF resume." });
   }
-
-  return res.status(200).json({ message: "Resume processed and stored successfully." });
 });
 
 // Endpoint 2: Review a new resume
@@ -91,50 +83,55 @@ app.post("/review-resume", async (req, res) => {
     return res.status(500).json({ error: "No resumes stored for comparison." });
   }
 
-  // Retrieve matching resumes
-  const retriever = vectorStore.asRetriever();
-  const matchingResumes = await retriever.retrieve(resumeText);
+  try {
+    // Retrieve matching resumes
+    const retriever = vectorStore.asRetriever();
+    const matchingResumes = await retriever.retrieve(resumeText);
 
-  // Format the retrieved resumes
-  const formatDocs = (docs) => {
-    return docs.map((doc) => doc.pageContent).join("\n");
-  };
+    // Format the retrieved resumes
+    const formatDocs = (docs) => {
+      return docs.map((doc) => doc.pageContent).join("\n");
+    };
 
-  // Create a custom prompt for scoring
-  const customPrompt = PromptTemplate.fromTemplate(
-    `You are a hiring assistant. Based on the context provided below, evaluate the candidate's resume.
+    // Create a custom prompt for scoring
+    const customPrompt = PromptTemplate.fromTemplate(
+      `You are a hiring assistant. Based on the context provided below, evaluate the candidate's resume.
 
-    Requirements: {requirements}
+      Requirements: {requirements}
 
-    Matching Resumes:
-    {context}
+      Matching Resumes:
+      {context}
 
-    Candidate Resume:
-    {resumeText}
+      Candidate Resume:
+      {resumeText}
 
-    Provide a score between 0 and 100 and your reasoning on whether to consider this candidate or not:`
-  );
+      Provide a score between 0 and 100 and your reasoning on whether to consider this candidate or not:`
+    );
 
-  const llm = new OpenAI({
-    apiKey: process.env.OPENAI_API_KEY,
-  });
+    const llm = new OpenAI({
+      apiKey: process.env.OPENAI_API_KEY,
+    });
 
-  const evaluateResumeChain = RunnableSequence.from([
-    {
-      context: matchingResumes.pipe(formatDocs),
-      requirements: new RunnablePassthrough(),
-      resumeText: new RunnablePassthrough(),
-    },
-    customPrompt,
-    llm,
-  ]);
+    const evaluateResumeChain = RunnableSequence.from([
+      {
+        context: matchingResumes.pipe(formatDocs),
+        requirements: new RunnablePassthrough(),
+        resumeText: new RunnablePassthrough(),
+      },
+      customPrompt,
+      llm,
+    ]);
 
-  const response = await evaluateResumeChain.invoke({
-    requirements,
-    resumeText,
-  });
+    const response = await evaluateResumeChain.invoke({
+      requirements,
+      resumeText,
+    });
 
-  return res.status(200).json({ score: response });
+    return res.status(200).json({ score: response });
+  } catch (error) {
+    console.error("Error reviewing resume:", error);
+    return res.status(500).json({ error: "Failed to review resume." });
+  }
 });
 
 // Start the server
