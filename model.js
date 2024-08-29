@@ -53,12 +53,18 @@ app.post("/process-pdf-resume", upload.single("resume"), async (req, res) => {
 
     const chunks = await splitter.splitDocuments(docs);
 
+    // Add status to each chunk
+    const chunksWithStatus = chunks.map(chunk => ({
+      ...chunk,
+      metadata: { status }
+    }));
+
     // Store the processed chunks in the vector database
     if (!vectorStore) {
-      vectorStore = await FaissStore.fromDocuments(chunks, new OpenAIEmbeddings());
-      console.log("success in vector store here")
+      vectorStore = await FaissStore.fromDocuments(chunksWithStatus, new OpenAIEmbeddings());
+      console.log("Success in vector store here");
     } else {
-      await vectorStore.addDocuments(chunks);
+      await vectorStore.addDocuments(chunksWithStatus);
     }
 
     // Optionally, delete the uploaded file after processing
@@ -71,12 +77,14 @@ app.post("/process-pdf-resume", upload.single("resume"), async (req, res) => {
   }
 });
 
-// Endpoint 2: Review a new resume
-app.post("/review-resume", async (req, res) => {
-  const { resumeText, requirements } = req.body;
 
-  if (!resumeText || !requirements) {
-    return res.status(400).json({ error: "Resume text and requirements are required." });
+// Endpoint 2: Review a new resume
+app.post("/review-resume", upload.single("resume"), async (req, res) => {
+  const { requirements } = req.body;
+  const { file } = req;
+
+  if (!file || !requirements) {
+    return res.status(400).json({ error: "Resume file and requirements are required." });
   }
 
   if (!vectorStore) {
@@ -84,6 +92,18 @@ app.post("/review-resume", async (req, res) => {
   }
 
   try {
+    // Load and process the uploaded PDF document
+    const loader = new PDFLoader(file.path);
+    const docs = await loader.load();
+
+    const splitter = new RecursiveCharacterTextSplitter({
+      chunkSize: 1000,
+      chunkOverlap: 10,
+    });
+
+    const chunks = await splitter.splitDocuments(docs);
+    const resumeText = chunks.map(chunk => chunk.pageContent).join("\n");
+
     // Retrieve matching resumes
     const retriever = vectorStore.asRetriever();
     const matchingResumes = await retriever.retrieve(resumeText);
@@ -127,12 +147,16 @@ app.post("/review-resume", async (req, res) => {
       resumeText,
     });
 
+    // Optionally, delete the uploaded file after processing
+    fs.unlinkSync(file.path);
+
     return res.status(200).json({ score: response });
   } catch (error) {
     console.error("Error reviewing resume:", error);
     return res.status(500).json({ error: "Failed to review resume." });
   }
 });
+
 
 // Start the server
 const PORT = process.env.PORT || 3000;
