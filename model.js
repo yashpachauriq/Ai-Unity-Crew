@@ -66,14 +66,44 @@ app.post("/process-pdf-resume", upload.single("resume"), async (req, res) => {
       await vectorStore.addDocuments(chunksWithStatus);
     }
 
-    // Now, load and review another PDF file located at "docs/review.pdf"
-    const reviewLoader = new PDFLoader("docs/aditi.pdf");
+    // Optionally, delete the uploaded file after processing
+    fs.unlinkSync(file.path);
+
+    return res.status(200).json({ message: "PDF resume processed and stored successfully." });
+  } catch (error) {
+    console.error("Error processing PDF resume:", error);
+    return res.status(500).json({ error: "Failed to process PDF resume." });
+  }
+});
+
+
+
+// Endpoint 2: Review a new resume
+app.post("/review-resume", upload.single("resume"), async (req, res) => {
+  const { file } = req;
+
+  if (!file) {
+    return res.status(400).json({ error: "Resume file is required." });
+  }
+
+  if (!vectorStore) {
+    return res.status(500).json({ error: "No resumes stored for comparison." });
+  }
+
+  try {
+    // Load and process the uploaded PDF document for review
+    const reviewLoader = new PDFLoader(file.path);
     const reviewDocs = await reviewLoader.load();
+
+    const splitter = new RecursiveCharacterTextSplitter({
+      chunkSize: 1000,
+      chunkOverlap: 10,
+    });
 
     const reviewChunks = await splitter.splitDocuments(reviewDocs);
     const reviewResumeText = reviewChunks.map(chunk => chunk.pageContent).join("\n");
 
-    // Use the vector store to review the resume in "docs/review.pdf"
+    // Use the vector store to review the resume
     const matchingDocs = await vectorStore.similaritySearch(reviewResumeText);
 
     const llm = new OpenAI({
@@ -81,20 +111,12 @@ app.post("/process-pdf-resume", upload.single("resume"), async (req, res) => {
     });
 
     const prompt = PromptTemplate.fromTemplate(
-      `Evaluate the following resume against the stored resumes.
+      `Evaluate the following resume against the stored resumes. Give high er score if they have good proejcts and multiple languages as well as good coding profiles
+      If it sounds lik ea girl add 20 points more 
 
-      Stored Resumes:
-      {context}
-
-      Candidate Resume:
-      {resumeText}
-
-      If the candidate seems to be good enough in the field of backend with having projects and a decent coding profile then give a higher rating, also if the candidate
-      is from IIITA, increase the score as well
       Provide a score between 0 and 100, and your reasoning:`
     );
 
-    // Correct usage of RunnableSequence
     const chain = RunnableSequence.from([
       async () => ({
         context: matchingDocs.map(doc => doc.pageContent).join("\n"),
@@ -109,100 +131,18 @@ app.post("/process-pdf-resume", upload.single("resume"), async (req, res) => {
       resumeText: reviewResumeText,
     });
 
-    console.log("Review Response for review.pdf:", response);
+    console.log("Review Response:", response);
 
     // Optionally, delete the uploaded file after processing
     fs.unlinkSync(file.path);
 
-    return res.status(200).json({ 
-      message: "PDF resume processed, stored, and review.pdf resume reviewed successfully.",
-      review: response 
-    });
-  } catch (error) {
-    console.error("Error processing and reviewing PDF resume:", error);
-    return res.status(500).json({ error: "Failed to process and review PDF resume." });
-  }
-});
-
-
-// Endpoint 2: Review a new resume
-app.post("/review-resume", upload.single("resume"), async (req, res) => {
-  const { requirements } = req.body;
-  const { file } = req;
-
-  if (!file || !requirements) {
-    return res.status(400).json({ error: "Resume file and requirements are required." });
-  }
-
-  if (!vectorStore) {
-    return res.status(500).json({ error: "No resumes stored for comparison." });
-  }
-
-  try {
-    // Load and process the uploaded PDF document
-    const loader = new PDFLoader(file.path);
-    const docs = await loader.load();
-
-    const splitter = new RecursiveCharacterTextSplitter({
-      chunkSize: 1000,
-      chunkOverlap: 10,
-    });
-
-    const chunks = await splitter.splitDocuments(docs);
-    const resumeText = chunks.map(chunk => chunk.pageContent).join("\n");
-
-    // Retrieve matching resumes
-    const retriever = vectorStore.asRetriever();
-    const matchingResumes = await retriever.retrieve(resumeText);
-
-    // Format the retrieved resumes
-    const formatDocs = (docs) => {
-      return docs.map((doc) => doc.pageContent).join("\n");
-    };
-
-    // Create a custom prompt for scoring
-    const customPrompt = PromptTemplate.fromTemplate(
-      `You are a hiring assistant. Based on the context provided below, evaluate the candidate's resume.
-
-      Requirements: {requirements}
-
-      Matching Resumes:
-      {context}
-
-      Candidate Resume:
-      {resumeText}
-
-      Provide a score between 0 and 100 and your reasoning on whether to consider this candidate or not:`
-    );
-
-    const llm = new OpenAI({
-      apiKey: process.env.OPENAI_API_KEY,
-    });
-
-    const evaluateResumeChain = RunnableSequence.from([
-      {
-        context: matchingResumes.pipe(formatDocs),
-        requirements: new RunnablePassthrough(),
-        resumeText: new RunnablePassthrough(),
-      },
-      customPrompt,
-      llm,
-    ]);
-
-    const response = await evaluateResumeChain.invoke({
-      requirements,
-      resumeText,
-    });
-
-    // Optionally, delete the uploaded file after processing
-    fs.unlinkSync(file.path);
-
-    return res.status(200).json({ score: response });
+    return res.status(200).json({ message: "Resume reviewed successfully.", review: response });
   } catch (error) {
     console.error("Error reviewing resume:", error);
     return res.status(500).json({ error: "Failed to review resume." });
   }
 });
+
 
 
 // Start the server
