@@ -141,111 +141,103 @@ app.post(
 // Endpoint 1: Process and store a PDF resume
 // Endpoint: Review and evaluate a resume
 app.post(
-  "/review-resume",
-  upload.single("resume"),
-  processResume,
-  async (req, res) => {
-    const { formattedResume } = req;
-    const { requirements } = req.body;
-
-    if (!formattedResume) {
-      return res.status(400).json({ error: "Resume formatting failed." });
-    }
-
-    if (!requirements) {
-      return res
-        .status(400)
-        .json({ error: "Evaluation requirements are required." });
-    }
-
-    try {
-      if (!vectorStore) {
-        // Load the vector store if not already loaded
-        vectorStore = await FaissStore.load(directory, new OpenAIEmbeddings());
+    "/review-resume",
+    upload.single("resume"),
+    processResume,
+    async (req, res) => {
+      const { formattedResume } = req;
+      const { requirements } = req.body;
+  
+      if (!formattedResume) {
+        return res.status(400).json({ error: "Resume formatting failed." });
       }
-
-      // Hardcoding the number of similar documents to retrieve
-      const numSimilarDocs = 4;
-
-      // Use the vector store to review the resume
-      const matchingDocs = await vectorStore.similaritySearch(
-        formattedResume,
-        numSimilarDocs
-      );
-      const matchingText = matchingDocs
-        .map((doc) => doc.pageContent)
-        .join("\n");
-
-    
+  
+      if (!requirements) {
+        return res.status(400).json({ error: "Evaluation requirements are required." });
+      }
+  
+      try {
+        if (!vectorStore) {
+          // Load the vector store if not already loaded
+          vectorStore = await FaissStore.load(directory, new OpenAIEmbeddings());
+        }
+  
+        // Hardcoding the number of similar documents to retrieve
+        const numSimilarDocs = 4;
+  
+        // Use the vector store to review the resume
+        const matchingDocs = await vectorStore.similaritySearch(
+          formattedResume,
+          numSimilarDocs
+        );
+        const matchingText = matchingDocs
+          .map((doc) => doc.pageContent)
+          .join("\n");
+  
         const llm = new OpenAI({
-            apiKey: process.env.OPENAI_API_KEY,
-            });
-
-      // Incorporate the requirements into the prompt
-      const prompt = PromptTemplate.fromTemplate(
-        `You are a recruiter evaluating resumes for a Product Manager position. Please follow these specific instructions:
-
-Requirements: {requirements} (Include detailed requirements for the Product Manager role here)
-
-Criteria for Scoring:
-
-Quality of Projects and Relevant Experience: Assess the depth and relevance of the candidate's past projects and work experience related to product management.
-Proficiency in Product Management Tools and Methodologies: Evaluate the candidate's experience with product management tools (e.g., JIRA, Aha!) and methodologies (e.g., Agile, Scrum).
-Leadership and Stakeholder Management: Consider the candidate's ability to lead teams and manage stakeholders effectively.
-Problem-Solving and Strategic Thinking: Assess the candidate’s problem-solving skills and ability to think strategically about product development.
-Contextual Information: Review the provided matching resumes data to understand our hiring preferences and context better. This information will help you align the evaluation with our specific needs.
-
-Instructions for HR: Perform an initial screening of the resumes based on the criteria and requirements provided. Assign a score between 0 and 100 reflecting the candidate’s fit for the Product Manager role. Provide reasoning for the score, detailing how the candidate meets or falls short of the given criteria.`
-      );
-
-      const chain = RunnableSequence.from([
-        async () => ({
-          context: matchingText,
-          resumeText: formattedResume,
-          requirements,
-        }),
-        prompt,
-        llm,
-      ]);
-
-      const response = await chain.invoke({
-        context: matchingText,
-        resumeText: formattedResume,
-        requirements,
-      });
-
-      // Extract the score using a regex
-      const scoreMatch = response.match(/Score:\s*(\d+)/);
-      const score = scoreMatch ? parseInt(scoreMatch[1], 10) : 0;
-
-      // Determine the status based on the score
-      const status = score >= 75 ? "hired" : "not hired";
-
-      // Save the reviewed resume back to the vector store with the status
-      const reviewChunksWithMetadata = [
-        {
-          pageContent: formattedResume,
-          metadata: { status, role: req.body.role },
-        },
-      ];
-
-      await vectorStore.addDocuments(reviewChunksWithMetadata);
-      await vectorStore.save(directory);
-
-
-      return res
-        .status(200)
-        .json({
+          apiKey: process.env.OPENAI_API_KEY,
+        });
+  
+        // Create the prompt with context and requirements
+        const prompt = `
+          You are a recruiter evaluating resumes for a Product Manager position. 
+  
+          **Context:**
+          Here are some details from previously matched resumes for reference:
+          ${matchingText}
+  
+          **Resume to Evaluate:**
+          ${formattedResume}
+  
+          **Requirements:**
+          ${requirements}
+  
+          **Criteria for Scoring:**
+          1. **Quality of Projects and Relevant Experience:** Assess the depth and relevance of the candidate's past projects and work experience related to product management.
+          2. **Proficiency in Product Management Tools and Methodologies:** Evaluate the candidate's experience with product management tools (e.g., JIRA, Aha!) and methodologies (e.g., Agile, Scrum).
+          3. **Leadership and Stakeholder Management:** Consider the candidate's ability to lead teams and manage stakeholders effectively.
+          4. **Problem-Solving and Strategic Thinking:** Assess the candidate’s problem-solving skills and ability to think strategically about product development.
+  
+          **Instructions for HR:**
+          Perform an initial screening of the resume based on the criteria and requirements provided. Assign a score between 0 and 100 reflecting the candidate’s fit for the Product Manager role. Provide reasoning for the score, detailing how the candidate meets or falls short of the given criteria. Focus exclusively on the provided resume and requirements, and use the context to align with our specific needs.
+        `;
+  
+        // Generate response using the prompt
+        const response = await llm.generate({
+          prompt,
+          maxTokens: 1500, // Adjust as needed
+        });
+  
+        // Extract the score using a regex
+        const scoreMatch = response.text.match(/Score:\s*(\d+)/);
+        const score = scoreMatch ? parseInt(scoreMatch[1], 10) : 0;
+  
+        // Determine the status based on the score
+        const status = score >= 75 ? "hired" : "not hired";
+  
+        // Save the reviewed resume back to the vector store with the status
+        const reviewChunksWithMetadata = [
+          {
+            pageContent: formattedResume,
+            metadata: { status, role: req.body.role },
+          },
+        ];
+  
+        await vectorStore.addDocuments(reviewChunksWithMetadata);
+        await vectorStore.save(directory);
+  
+        return res.status(200).json({
           message: "Resume reviewed and stored successfully.",
-          review: response,
+          review: response.text,
           status,
         });
-    } catch (error) {
-      console.error("Error reviewing resume:", error);
-      return res.status(500).json({ error: "Failed to review resume." });
+      } catch (error) {
+        console.error("Error reviewing resume:", error);
+        return res.status(500).json({ error: "Failed to review resume." });
+      }
     }
-  }
-);
+  );
+  
 
 // Start the server
 const PORT = process.env.PORT || 3000;
