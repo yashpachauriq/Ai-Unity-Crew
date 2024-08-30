@@ -10,27 +10,22 @@ import { OpenAI } from "@langchain/openai";
 import { RunnableSequence } from "@langchain/core/runnables";
 import { PromptTemplate } from "@langchain/core/prompts";
 import dotenv from "dotenv";
+import path from "path";
 
+// Load environment variables
 dotenv.config();
 
+// Create an Express app
 const app = express();
 app.use(bodyParser.json());
-
-let vectorStore;
 
 // Set up multer for file handling
 const upload = multer({ dest: "uploads/" });
 
-// Helper function to format LLM output
-const formatResponse = (response, status) => {
-  return `
-    Education: ${response.education || ""}
-    Skills: ${response.skills || ""}
-    Extra Curricular: ${response.extra_curricular || ""}
-    Experience: ${response.experience || ""}
-    Verdict: ${status}
-  `;
-};
+// Define the directory to save and load the vector store
+const directory = "./faiss-store";
+
+let vectorStore;
 
 // Endpoint 1: Process and store a PDF resume
 app.post("/process-pdf-resume", upload.single("resume"), async (req, res) => {
@@ -66,8 +61,8 @@ app.post("/process-pdf-resume", upload.single("resume"), async (req, res) => {
       await vectorStore.addDocuments(chunksWithStatus);
     }
 
-    // Optionally, delete the uploaded file after processing
-    fs.unlinkSync(file.path);
+    // Save the vector store to the directory
+    await vectorStore.save(directory);
 
     return res.status(200).json({ message: "PDF resume processed and stored successfully." });
   } catch (error) {
@@ -76,9 +71,6 @@ app.post("/process-pdf-resume", upload.single("resume"), async (req, res) => {
   }
 });
 
-
-
-// Endpoint 2: Review a new resume
 app.post("/review-resume", upload.single("resume"), async (req, res) => {
   const { file } = req;
 
@@ -87,7 +79,13 @@ app.post("/review-resume", upload.single("resume"), async (req, res) => {
   }
 
   if (!vectorStore) {
-    return res.status(500).json({ error: "No resumes stored for comparison." });
+    // Attempt to load the vector store if not already loaded
+    try {
+      vectorStore = await FaissStore.load(directory, new OpenAIEmbeddings());
+    } catch (error) {
+      console.error("Error loading vector store:", error);
+      return res.status(500).json({ error: "Failed to load vector store." });
+    }
   }
 
   try {
@@ -105,15 +103,15 @@ app.post("/review-resume", upload.single("resume"), async (req, res) => {
 
     // Use the vector store to review the resume
     const matchingDocs = await vectorStore.similaritySearch(reviewResumeText);
+    console.log(matchingDocs)
 
     const llm = new OpenAI({
       apiKey: process.env.OPENAI_API_KEY,
     });
 
     const prompt = PromptTemplate.fromTemplate(
-      `Evaluate the following resume against the stored resumes. Give high er score if they have good proejcts and multiple languages as well as good coding profiles
-      If it sounds lik ea girl add 20 points more 
-
+      `Evaluate the following resume against the stored resumes. Give a higher score if they have good projects, multiple languages, and good coding profiles.
+      Also, consider if they have worked in core backend languages. 
       Provide a score between 0 and 100, and your reasoning:`
     );
 
@@ -133,16 +131,32 @@ app.post("/review-resume", upload.single("resume"), async (req, res) => {
 
     console.log("Review Response:", response);
 
-    // Optionally, delete the uploaded file after processing
-    fs.unlinkSync(file.path);
+    // Parse the score from the response (assuming it's in a structured format)
+    const score = parseInt(response.match(/Score: (\d+)/)[1], 10);
+    let status;
 
-    return res.status(200).json({ message: "Resume reviewed successfully.", review: response });
+    // Determine the status based on the score
+    if (score >= 75) {
+      status = "hired";
+    } else {
+      status = "not hired";
+    }
+
+    // Save the reviewed resume back to the vector store with the status
+    const reviewChunksWithMetadata = reviewChunks.map(chunk => ({
+      ...chunk,
+      metadata: { status }
+    }));
+
+    await vectorStore.addDocuments(reviewChunksWithMetadata);
+    await vectorStore.save(directory);
+
+    return res.status(200).json({ message: "Resume reviewed and stored successfully.", review: response, status });
   } catch (error) {
     console.error("Error reviewing resume:", error);
     return res.status(500).json({ error: "Failed to review resume." });
   }
 });
-
 
 
 // Start the server
