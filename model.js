@@ -59,21 +59,68 @@ app.post("/process-pdf-resume", upload.single("resume"), async (req, res) => {
       metadata: { status }
     }));
 
-    // Store the processed chunks in the vector database
+    // Initialize or update the vector store
     if (!vectorStore) {
       vectorStore = await FaissStore.fromDocuments(chunksWithStatus, new OpenAIEmbeddings());
-      console.log("Success in vector store here");
     } else {
       await vectorStore.addDocuments(chunksWithStatus);
     }
 
+    // Now, load and review another PDF file located at "docs/review.pdf"
+    const reviewLoader = new PDFLoader("docs/aditi.pdf");
+    const reviewDocs = await reviewLoader.load();
+
+    const reviewChunks = await splitter.splitDocuments(reviewDocs);
+    const reviewResumeText = reviewChunks.map(chunk => chunk.pageContent).join("\n");
+
+    // Use the vector store to review the resume in "docs/review.pdf"
+    const matchingDocs = await vectorStore.similaritySearch(reviewResumeText);
+
+    const llm = new OpenAI({
+      apiKey: process.env.OPENAI_API_KEY,
+    });
+
+    const prompt = PromptTemplate.fromTemplate(
+      `Evaluate the following resume against the stored resumes.
+
+      Stored Resumes:
+      {context}
+
+      Candidate Resume:
+      {resumeText}
+
+      If the candidate seems to be good enough in the field of backend with having projects and a decent coding profile then give a higher rating, also if the candidate
+      is from IIITA, increase the score as well
+      Provide a score between 0 and 100, and your reasoning:`
+    );
+
+    // Correct usage of RunnableSequence
+    const chain = RunnableSequence.from([
+      async () => ({
+        context: matchingDocs.map(doc => doc.pageContent).join("\n"),
+        resumeText: reviewResumeText,
+      }),
+      prompt,
+      llm,
+    ]);
+
+    const response = await chain.invoke({
+      context: matchingDocs.map(doc => doc.pageContent).join("\n"),
+      resumeText: reviewResumeText,
+    });
+
+    console.log("Review Response for review.pdf:", response);
+
     // Optionally, delete the uploaded file after processing
     fs.unlinkSync(file.path);
 
-    return res.status(200).json({ message: "PDF resume processed and stored successfully." });
+    return res.status(200).json({ 
+      message: "PDF resume processed, stored, and review.pdf resume reviewed successfully.",
+      review: response 
+    });
   } catch (error) {
-    console.error("Error processing PDF resume:", error);
-    return res.status(500).json({ error: "Failed to process PDF resume." });
+    console.error("Error processing and reviewing PDF resume:", error);
+    return res.status(500).json({ error: "Failed to process and review PDF resume." });
   }
 });
 
