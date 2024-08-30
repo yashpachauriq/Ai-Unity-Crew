@@ -27,6 +27,13 @@ const directory = "./faiss-store";
 
 let vectorStore;
 
+// Utility function to clean up uploaded files
+const cleanupFile = (filePath) => {
+  fs.unlink(filePath, (err) => {
+    if (err) console.error("Error deleting file:", err);
+  });
+};
+
 // Endpoint 1: Process and store a PDF resume
 app.post("/process-pdf-resume", upload.single("resume"), async (req, res) => {
   const { status } = req.body;
@@ -37,7 +44,6 @@ app.post("/process-pdf-resume", upload.single("resume"), async (req, res) => {
   }
 
   try {
-    // Load and process the uploaded PDF document
     const loader = new PDFLoader(file.path);
     const docs = await loader.load();
 
@@ -64,6 +70,9 @@ app.post("/process-pdf-resume", upload.single("resume"), async (req, res) => {
     // Save the vector store to the directory
     await vectorStore.save(directory);
 
+    // Clean up the uploaded file
+    cleanupFile(file.path);
+
     return res.status(200).json({ message: "PDF resume processed and stored successfully." });
   } catch (error) {
     console.error("Error processing PDF resume:", error);
@@ -73,23 +82,22 @@ app.post("/process-pdf-resume", upload.single("resume"), async (req, res) => {
 
 app.post("/review-resume", upload.single("resume"), async (req, res) => {
   const { file } = req;
+  const { requirements } = req.body; // Removed numSimilarDocs since it will be hardcoded
 
   if (!file) {
     return res.status(400).json({ error: "Resume file is required." });
   }
 
-  if (!vectorStore) {
-    // Attempt to load the vector store if not already loaded
-    try {
-      vectorStore = await FaissStore.load(directory, new OpenAIEmbeddings());
-    } catch (error) {
-      console.error("Error loading vector store:", error);
-      return res.status(500).json({ error: "Failed to load vector store." });
-    }
+  if (!requirements) {
+    return res.status(400).json({ error: "Evaluation requirements are required." });
   }
 
   try {
-    // Load and process the uploaded PDF document for review
+    if (!vectorStore) {
+      // Load the vector store if not already loaded
+      vectorStore = await FaissStore.load(directory, new OpenAIEmbeddings());
+    }
+
     const reviewLoader = new PDFLoader(file.path);
     const reviewDocs = await reviewLoader.load();
 
@@ -101,46 +109,51 @@ app.post("/review-resume", upload.single("resume"), async (req, res) => {
     const reviewChunks = await splitter.splitDocuments(reviewDocs);
     const reviewResumeText = reviewChunks.map(chunk => chunk.pageContent).join("\n");
 
+    // Hardcoding the number of similar documents to retrieve
+    const numSimilarDocs = 1;
+
     // Use the vector store to review the resume
-    const matchingDocs = await vectorStore.similaritySearch(reviewResumeText);
-    console.log(matchingDocs)
+    const matchingDocs = await vectorStore.similaritySearch(reviewResumeText, numSimilarDocs);
+    const matchingText = matchingDocs.map(doc => doc.pageContent).join("\n");
 
     const llm = new OpenAI({
       apiKey: process.env.OPENAI_API_KEY,
     });
 
+    // Incorporate the requirements into the prompt
     const prompt = PromptTemplate.fromTemplate(
-      `Evaluate the following resume against the stored resumes. Give a higher score if they have good projects, multiple languages, and good coding profiles.
-      Also, consider if they have worked in core backend languages. 
-      Provide a score between 0 and 100, and your reasoning:`
+      `You are a recruiter evaluating resumes. 
+      Here are the specific requirements for this evaluation: {requirements}
+      Consider the following criteria when scoring: 
+      1. Quality of projects and relevant experience.
+      2. Proficiency in multiple programming languages.
+      3. Strength of coding profiles (e.g., GitHub, LeetCode).
+      4. Experience in core backend technologies.
+      Assign a score between 0 and 100 based on these criteria and the requirements provided, and provide reasoning for the score.`
     );
 
     const chain = RunnableSequence.from([
       async () => ({
-        context: matchingDocs.map(doc => doc.pageContent).join("\n"),
+        context: matchingText,
         resumeText: reviewResumeText,
+        requirements,
       }),
       prompt,
       llm,
     ]);
 
     const response = await chain.invoke({
-      context: matchingDocs.map(doc => doc.pageContent).join("\n"),
+      context: matchingText,
       resumeText: reviewResumeText,
+      requirements,
     });
 
-    console.log("Review Response:", response);
-
-    // Parse the score from the response (assuming it's in a structured format)
-    const score = parseInt(response.match(/Score: (\d+)/)[1], 10);
-    let status;
+    // Extract the score using a regex
+    const scoreMatch = response.match(/Score:\s*(\d+)/);
+    const score = scoreMatch ? parseInt(scoreMatch[1], 10) : 0;
 
     // Determine the status based on the score
-    if (score >= 75) {
-      status = "hired";
-    } else {
-      status = "not hired";
-    }
+    const status = score >= 75 ? "hired" : "not hired";
 
     // Save the reviewed resume back to the vector store with the status
     const reviewChunksWithMetadata = reviewChunks.map(chunk => ({
@@ -150,6 +163,9 @@ app.post("/review-resume", upload.single("resume"), async (req, res) => {
 
     await vectorStore.addDocuments(reviewChunksWithMetadata);
     await vectorStore.save(directory);
+
+    // Clean up the uploaded file
+    cleanupFile(file.path);
 
     return res.status(200).json({ message: "Resume reviewed and stored successfully.", review: response, status });
   } catch (error) {
