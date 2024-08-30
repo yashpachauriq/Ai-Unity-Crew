@@ -21,17 +21,6 @@ let vectorStore;
 // Set up multer for file handling
 const upload = multer({ dest: "uploads/" });
 
-// Helper function to format LLM output
-const formatResponse = (response, status) => {
-  return `
-    Education: ${response.education || ""}
-    Skills: ${response.skills || ""}
-    Extra Curricular: ${response.extra_curricular || ""}
-    Experience: ${response.experience || ""}
-    Verdict: ${status}
-  `;
-};
-
 // Endpoint 1: Process and store a PDF resume
 app.post("/process-pdf-resume", upload.single("resume"), async (req, res) => {
   const { status } = req.body;
