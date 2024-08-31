@@ -36,11 +36,11 @@ const cleanupFile = (filePath) => {
 
 // Endpoint 1: Process and store a PDF resume
 app.post("/process-pdf-resume", upload.single("resume"), async (req, res) => {
-  const { status } = req.body;
+  const { status, reason } = req.body;
   const { file } = req;
 
-  if (!file || !status) {
-    return res.status(400).json({ error: "Resume file and status are required." });
+  if (!file || !status || !reason) {
+    return res.status(400).json({ error: "Resume file, status, and requirements are required." });
   }
 
   try {
@@ -54,10 +54,10 @@ app.post("/process-pdf-resume", upload.single("resume"), async (req, res) => {
 
     const chunks = await splitter.splitDocuments(docs);
 
-    // Add status to each chunk
+    // Add status and requirements to each chunk
     const chunksWithStatus = chunks.map(chunk => ({
       ...chunk,
-      metadata: { status }
+      metadata: { status, reason }
     }));
 
     // Initialize or update the vector store
@@ -82,7 +82,7 @@ app.post("/process-pdf-resume", upload.single("resume"), async (req, res) => {
 
 app.post("/review-resume", upload.single("resume"), async (req, res) => {
   const { file } = req;
-  const { requirements } = req.body; // Removed numSimilarDocs since it will be hardcoded
+  const { requirements } = req.body;
 
   if (!file) {
     return res.status(400).json({ error: "Resume file is required." });
@@ -122,14 +122,18 @@ app.post("/review-resume", upload.single("resume"), async (req, res) => {
 
     // Incorporate the requirements into the prompt
     const prompt = PromptTemplate.fromTemplate(
-      `You are a recruiter evaluating resumes. 
-      Here are the specific requirements for this evaluation: {requirements}
-      Consider the following criteria when scoring: 
-      1. Quality of projects and relevant experience.
-      2. Proficiency in multiple programming languages.
-      3. Strength of coding profiles (e.g., GitHub, LeetCode).
-      4. Experience in core backend technologies.
-      Assign a score between 0 and 100 based on these criteria and the requirements provided, and provide reasoning for the score.`
+     `
+      You are a recruiter evaluating resumes for a Product Manager position.
+      *Requirements: These are requirements which are needed in the evaluation*
+      ${requirements}
+      *Resume to Evaluate:*
+      ${reviewResumeText}
+      *Context:*
+      Below are the previously screened resumes which resemble the Resume to Evaluate, so take this as a small consideration while evaluating the Resume to Evaluate.
+      ${matchingText}
+      *Instructions for HR:*
+      Perform an initial screening of the resume based on the Requirements and Context provided. Assign a score between 0 and 100 reflecting the candidate’s fit for the Product Manager role. Provide reasoning for the score, detailing how the candidate meets or falls short of the given criteria.
+     `
     );
 
     const chain = RunnableSequence.from([
@@ -148,31 +152,16 @@ app.post("/review-resume", upload.single("resume"), async (req, res) => {
       requirements,
     });
 
-    // Extract the score using a regex
-    const scoreMatch = response.match(/Score:\s*(\d+)/);
-    const score = scoreMatch ? parseInt(scoreMatch[1], 10) : 0;
-
-    // Determine the status based on the score
-    const status = score >= 75 ? "hired" : "not hired";
-
-    // Save the reviewed resume back to the vector store with the status
-    const reviewChunksWithMetadata = reviewChunks.map(chunk => ({
-      ...chunk,
-      metadata: { status }
-    }));
-
-    await vectorStore.addDocuments(reviewChunksWithMetadata);
-    await vectorStore.save(directory);
-
     // Clean up the uploaded file
     cleanupFile(file.path);
 
-    return res.status(200).json({ message: "Resume reviewed and stored successfully.", review: response, status });
+    return res.status(200).json({ message: "Resume reviewed successfully.", review: response });
   } catch (error) {
     console.error("Error reviewing resume:", error);
     return res.status(500).json({ error: "Failed to review resume." });
   }
 });
+
 
 
 // Start the server
