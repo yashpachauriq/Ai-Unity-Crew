@@ -11,13 +11,17 @@ import { RunnableSequence } from "@langchain/core/runnables";
 import { PromptTemplate } from "@langchain/core/prompts";
 import dotenv from "dotenv";
 import path from "path";
+import cors from 'cors';
+dotenv.config();
+
 
 // Load environment variables
-dotenv.config();
 
 // Create an Express app
 const app = express();
 app.use(bodyParser.json());
+app.use(cors()); 
+
 
 // Set up multer for file handling
 const upload = multer({ dest: "uploads/" });
@@ -33,6 +37,15 @@ const cleanupFile = (filePath) => {
     if (err) console.error("Error deleting file:", err);
   });
 };
+
+app.use(cors({
+  origin: '*', // Ensure this matches your frontend origin
+  methods: ['GET', 'POST'], // Specify the methods your API will support
+  allowedHeaders: ['Content-Type', 'Authorization'], // Include necessary headers
+}));
+
+// Handle preflight requests
+
 
 // Endpoint 1: Process and store a PDF resume
 app.post("/process-pdf-resume", upload.single("resume"), async (req, res) => {
@@ -133,6 +146,7 @@ app.post("/review-resume", upload.single("resume"), async (req, res) => {
       ${matchingText}
       *Instructions for HR:*
       Perform an initial screening of the resume based on the Requirements and Context provided. Assign a score between 0 and 100 reflecting the candidate’s fit for the Product Manager role. Provide reasoning for the score, detailing how the candidate meets or falls short of the given criteria.
+      If the candidate has less than 2 years of experience ensure them them a lower rating as well and not hire
      `
     );
 
